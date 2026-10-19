@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MediaPipe 손 마디 인식 (21 Landmarks)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+      background-color: #111827;
+      color: #f9fafb;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 12px;
+      font-weight: 700;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    #startBtn {
+      padding: 12px 24px;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #ffffff;
+      background-color: #2563eb;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background-color 0.2s ease, transform 0.1s ease;
+    }
+
+    #startBtn:hover:not(:disabled) {
+      background-color: #1d4ed8;
+    }
+
+    #startBtn:active:not(:disabled) {
+      transform: scale(0.98);
+    }
+
+    #startBtn:disabled {
+      background-color: #4b5563;
+      cursor: not-allowed;
+    }
+
+    #statusText {
+      font-size: 0.95rem;
+      color: #9ca3af;
+    }
+
+    /* 메인 레이아웃: 왼쪽 카메라 화면 + 오른쪽 큰 숫자 표시 */
+    .main-layout {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 32px;
+      width: 100%;
+      max-width: 1000px;
+      flex-wrap: wrap;
+    }
+
+    /* 비디오와 캔버스를 겹쳐 배치하고 거울처럼 좌우 반전 */
+    .viewer-container {
+      position: relative;
+      width: 640px;
+      height: 480px;
+      max-width: 100%;
+      background-color: #1f2937;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      border: 1px solid #374151;
+      flex-shrink: 0;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1); /* 거울 모드 (좌우 반전) */
+    }
+
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      transform: scaleX(-1); /* 거울 모드 (좌우 반전) */
+    }
+
+    /* 오른쪽 손가락 개수 및 손 모양 표시 패널 */
+    .count-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 280px;
+      height: 480px;
+      background-color: #1f2937;
+      border-radius: 12px;
+      border: 1px solid #374151;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      padding: 20px;
+      user-select: none;
+    }
+
+    .count-label {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #9ca3af;
+      margin-bottom: 8px;
+    }
+
+    #fingerCount {
+      font-size: 10rem;
+      font-weight: 800;
+      line-height: 1;
+      color: #38bdf8;
+      text-shadow: 0 0 30px rgba(56, 189, 248, 0.35);
+    }
+
+    #gestureName {
+      margin-top: 18px;
+      font-size: 3rem;
+      font-weight: 800;
+      color: #fbbf24;
+      min-height: 3.6rem;
+      text-align: center;
+      text-shadow: 0 0 20px rgba(251, 191, 36, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <h1>손 마디 21개 포인트 인식 & 손가락 개수 세기</h1>
+
+  <div class="controls">
+    <button id="startBtn" disabled>모델 불러오는 중...</button>
+    <span id="statusText">MediaPipe 모델을 초기화하고 있습니다...</span>
+  </div>
+
+  <div class="main-layout">
+    <div class="viewer-container">
+      <video id="webcam" autoplay playsinline muted></video>
+      <canvas id="outputCanvas"></canvas>
+    </div>
+
+    <div class="count-panel">
+      <span class="count-label">펴진 손가락 개수</span>
+      <div id="fingerCount">-</div>
+      <div id="gestureName">-</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import {
+      FilesetResolver,
+      GestureRecognizer
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
+
+    const startBtn = document.getElementById("startBtn");
+    const statusText = document.getElementById("statusText");
+    const video = document.getElementById("webcam");
+    const canvas = document.getElementById("outputCanvas");
+    const ctx = canvas.getContext("2d");
+    const fingerCountEl = document.getElementById("fingerCount");
+    const gestureNameEl = document.getElementById("gestureName");
+
+    let gestureRecognizer = null;
+    let webcamRunning = false;
+    let lastVideoTime = -1;
+
+    // 깜빡임 방지(0.3초 유지 확인)용 상태 변수
+    let displayedCount = null;
+    let candidateCount = null;
+    let candidateStartTime = 0;
+    const HOLD_DURATION_MS = 300; // 0.3초
+
+    // GestureRecognizer 카테고리 이름 → 한글 손 모양 매핑
+    const GESTURE_NAME_MAP = {
+      Closed_Fist: " 주먹",
+      Open_Palm: " 보",
+      Pointing_Up: " 하나",
+      Victory: " 브이",
+      Thumb_Up: " 최고",
+      Thumb_Down: " 별로",
+      ILoveYou: " 사랑해"
+    };
+
+    // 21개 손 마디 연결선 정의 (MediaPipe Hand Landmarks 표준 연결 구조)
+    const HAND_CONNECTIONS = [
+      [0, 1], [1, 2], [2, 3], [3, 4],       // 엄지
+      [0, 5], [5, 6], [6, 7], [7, 8],       // 검지
+      [5, 9], [9, 10], [10, 11], [11, 12],  // 중지
+      [9, 13], [13, 14], [14, 15], [15, 16],// 약지
+      [13, 17], [0, 17], [17, 18], [18, 19], [19, 20] // 소지 및 손바닥
+    ];
+
+    // 두 랜드마크 사이의 2D 거리 계산
+    function getDistance(p1, p2) {
+      return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    }
+
+    // 펴진 손가락 개수(0~5) 계산
+    function countExtendedFingers(landmarks) {
+      let count = 0;
+
+      // 1) 엄지: 손끝(4번)이 새끼손가락 뿌리(17번)에서 엄지 둘째 마디(3번)보다 멀면 펴진 것으로 판단
+      const thumbTipDist = getDistance(landmarks[4], landmarks[17]);
+      const thumbIpDist = getDistance(landmarks[3], landmarks[17]);
+      if (thumbTipDist > thumbIpDist) {
+        count++;
+      }
+
+      // 2) 나머지 네 손가락: 손끝(8, 12, 16, 20번)이 손목(0번)에서 둘째 마디(6, 10, 14, 18번)보다 멀면 펴진 것으로 판단
+      const fingerPairs = [
+        [8, 6],   // 검지 (끝: 8, 둘째 마디: 6)
+        [12, 10], // 중지 (끝: 12, 둘째 마디: 10)
+        [16, 14], // 약지 (끝: 16, 둘째 마디: 14)
+        [20, 18]  // 소지 (끝: 20, 둘째 마디: 18)
+      ];
+
+      for (const [tipIdx, pipIdx] of fingerPairs) {
+        const tipDist = getDistance(landmarks[tipIdx], landmarks[0]);
+        const pipDist = getDistance(landmarks[pipIdx], landmarks[0]);
+        if (tipDist > pipDist) {
+          count++;
+        }
+      }
+
+      return count;
+    }
+
+    // 같은 개수가 0.3초 이상 유지될 때만 화면의 숫자를 변경
+    function updateFingerCountDisplay(newCount, nowInMs) {
+      if (newCount !== candidateCount) {
+        candidateCount = newCount;
+        candidateStartTime = nowInMs;
+      } else if (
+        displayedCount !== candidateCount &&
+        nowInMs - candidateStartTime >= HOLD_DURATION_MS
+      ) {
+        displayedCount = candidateCount;
+        fingerCountEl.textContent = displayedCount !== null ? String(displayedCount) : "-";
+      }
+    }
+
+    // 1. MediaPipe GestureRecognizer 초기화
+    async function initGestureRecognizer() {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm"
+        );
+
+        const modelUrl =
+          "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task";
+
+        try {
+          gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: modelUrl,
+              delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            numHands: 1
+          });
+        } catch (gpuError) {
+          console.warn("GPU 초기화 실패, CPU 모드로 전환합니다:", gpuError);
+          gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: modelUrl
+            },
+            runningMode: "VIDEO",
+            numHands: 1
+          });
+        }
+
+        startBtn.disabled = false;
+        startBtn.textContent = "카메라 켜기";
+        statusText.textContent = "'카메라 켜기' 버튼을 눌러 시작하세요.";
+      } catch (error) {
+        console.error("모델 초기화 실패:", error);
+        statusText.textContent = "모델 로드 중 오류가 발생했습니다. 인터넷 연결을 확인해 주세요.";
+      }
+    }
+
+    // 2. 손 랜드마크(21개 점)와 연결선 그리기
+    function drawHandLandmarks(landmarks) {
+      const width = canvas.width;
+      const height = canvas.height;
+
+      // 연결선 그리기
+      ctx.strokeStyle = "#00FF88";
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+
+      for (const [startIdx, endIdx] of HAND_CONNECTIONS) {
+        const start = landmarks[startIdx];
+        const end = landmarks[endIdx];
+        if (!start || !end) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(start.x * width, start.y * height);
+        ctx.lineTo(end.x * width, end.y * height);
+        ctx.stroke();
+      }
+
+      // 21개 마디 점 그리기
+      for (let i = 0; i < landmarks.length; i++) {
+        const point = landmarks[i];
+        const x = point.x * width;
+        const y = point.y * height;
+
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = "#FF3366";
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "#FFFFFF";
+        ctx.stroke();
+      }
+    }
+
+    // 3. 실시간 비디오 프레임 분석 및 렌더링
+    function predictWebcam() {
+      if (!webcamRunning) return;
+
+      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
+
+        const nowInMs = performance.now();
+        if (video.currentTime !== lastVideoTime) {
+          lastVideoTime = video.currentTime;
+
+          try {
+            const results = gestureRecognizer.recognizeForVideo(video, nowInMs);
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (results.landmarks && results.landmarks.length > 0) {
+              const landmarks = results.landmarks[0];
+              // numHands: 1 설정에 맞춰 첫 번째 손의 21개 랜드마크 표시
+              drawHandLandmarks(landmarks);
+
+              // 펴진 손가락 개수를 계산하고 0.3초 유지 시 표시 갱신
+              const count = countExtendedFingers(landmarks);
+              updateFingerCountDisplay(count, nowInMs);
+
+              // GestureRecognizer 손 모양 이름 표시
+              if (results.gestures && results.gestures.length > 0 && results.gestures[0].length > 0) {
+                const categoryName = results.gestures[0][0].categoryName;
+                gestureNameEl.textContent = GESTURE_NAME_MAP[categoryName] || "-";
+              } else {
+                gestureNameEl.textContent = "-";
+              }
+            } else {
+              // 손이 감지되지 않을 때도 0.3초 이상 유지되면 '-'로 표시
+              updateFingerCountDisplay(null, nowInMs);
+              gestureNameEl.textContent = "-";
+            }
+          } catch (err) {
+            console.error("프레임 인식 오류:", err);
+          }
+        }
+      }
+
+      requestAnimationFrame(predictWebcam);
+    }
+
+    // 4. '카메라 켜기' 버튼 클릭 이벤트
+    startBtn.addEventListener("click", async () => {
+      if (!gestureRecognizer) return;
+
+      try {
+        startBtn.disabled = true;
+        statusText.textContent = "카메라 권한을 요청하는 중...";
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        webcamRunning = true;
+        startBtn.textContent = "카메라 실행 중";
+        statusText.textContent = "카메라에 손을 비춰 보세요.";
+        predictWebcam();
+      } catch (error) {
+        console.error("카메라 접근 실패:", error);
+        startBtn.disabled = false;
+        statusText.textContent = "카메라를 실행할 수 없습니다. 권한 설정 또는 다른 앱의 카메라 사용 여부를 확인해 주세요.";
+      }
+    });
+
+    initGestureRecognizer();
+  </script>
+</body>
+</html>
